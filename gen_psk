@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import binascii
+
+key_path = os.path.expanduser('~/.secure_bus_psk')
+
+if os.path.isfile(key_path):
+    if input('Overwrite key? [y/N]: ').lower() != 'y':
+        sys.exit(0)
+
+key = os.urandom(32)
+with open(key_path, 'wb') as f:
+    f.write(binascii.hexlify(key))
+
+print('Generated key to', key_path)
