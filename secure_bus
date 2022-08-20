@@ -13,6 +13,9 @@ import argparse
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
+class CryptoException(Exception):
+    pass
+
 class PskCipher:
     def __init__(
         self,
@@ -42,9 +45,9 @@ class PskCipher:
         if src_id in self._last_clk_by_id:
             # as a side effect, this will also prevent routing loop through multiple nodes
             if self._last_clk_by_id[src_id] >= clk:
-                raise Exception('Replay or wrong payload order detected, aborting')
+                raise CryptoException('Replay or wrong payload order detected, aborting')
             if abs(time.time() - clk) > self._clk_max_offset_sec:
-                raise Exception('Payload expired or clocks not in sync, aborting')
+                raise CryptoException('Payload expired or clocks not in sync, aborting')
         self._last_clk_by_id[src_id] = clk
         return src_id, plain
 
@@ -62,43 +65,44 @@ def parse_addr(addr):
     host, port = addr.split(':')
     return host, int(port)
 
-def send_encrypted(read, write, cipher):
-    data = read()
-    size_ulong = struct.pack('>L', len(data))
-    ciphertext = cipher.encrypt(size_ulong + data)
-    write(ciphertext)
-
 def recv_encrypted(read, write, cipher):
     # TODO is this a thread safe implementation
     ctx_by_src_id = {}
     while True:
         chunk = read(1400)
-        src_id, data = cipher.decrypt(chunk)
+        if not chunk:
+            break
+        try:
+            src_id, data = cipher.decrypt(chunk)
+        except CryptoException as e:
+            continue
         if src_id not in ctx_by_src_id:
             ctx_by_src_id[src_id] = {
+                'raw_buf': [],
                 'buf': [],
                 'size': None,
                 'pos': 0,
             }
         ctx = ctx_by_src_id[src_id]
+        ctx['raw_buf'].append(chunk)
         if ctx['size'] is None:
             ctx['size'] = struct.unpack('>L', data[:4])[0]
             data = data[4:]
         ctx['buf'].append(data)
         ctx['pos'] += len(data)
         if ctx['pos'] >= ctx['size']:
-            write((src_id, b''.join(ctx['buf'])))
-            ctx_by_src_id[src_id] = {
-                'buf': [],
-                'size': None,
-                'pos': 0,
-            }
+            write((
+                src_id,
+                b''.join(ctx['buf']),
+                b''.join(ctx['raw_buf']),
+            ))
+            del ctx_by_src_id[src_id]
 
 class LocalServer:
-    def __init__(self, addr, cipher):
+    def __init__(self, addr, handle_communication):
         self._host, self._port = parse_addr(addr)
+        self._handle_communication = handle_communication
         self._conns = []
-        self._cipher = cipher
         self._message_queue = queue.Queue()
         self._sock = self._create_server()
         threading.Thread(target=self._handle_connections).start()
@@ -108,7 +112,7 @@ class LocalServer:
         # TODO timeout
         # TODO concurrent sending (is such a thing even possible?)
         for conn, addr in self._conns:
-            send_encrypted(lambda: data, conn.send, self._cipher)
+            conn.send(data)
 
     def listen(self):
         while True:
@@ -124,16 +128,12 @@ class LocalServer:
             conn, addr = self._sock.accept()
             print(conn, addr)
             self._conns.append((conn, addr))
-            threading.Thread(target=lambda: recv_encrypted(
-                conn.recv,
-                self._message_queue.put,
-                self._cipher,
-            )).start()
+            threading.Thread(target=lambda: self._handle_communication(conn.recv, self._message_queue.put)).start()
 
 class RemoteServer:
-    def __init__(self, addr, cipher):
+    def __init__(self, addr, handle_communication):
         self._host, self._port = parse_addr(addr)
-        self._cipher = cipher
+        self._handle_communication = handle_communication
         self._message_queue = queue.Queue()
         self._sock = self._create_client()
         threading.Thread(target=self._handle_connection).start()
@@ -142,7 +142,7 @@ class RemoteServer:
         # TODO clean up self._conns on error
         # TODO timeout
         # TODO concurrent sending (is such a thing even possible?)
-        send_encrypted(lambda: data, self._sock.send, self._cipher)
+        self._sock.send(data)
 
     def listen(self):
         while True:
@@ -155,7 +155,7 @@ class RemoteServer:
         return client_sock
 
     def _handle_connection(self):
-        recv_encrypted(self._sock.recv, self._message_queue.put, self._cipher)
+        self._handle_communication(self._sock.recv, self._message_queue.put)
 
 def test_crypto(cipher):
     for p in [
@@ -178,22 +178,29 @@ def main():
         psk = binascii.unhexlify(f.read())
     cipher = PskCipher(psk)
 
-    local_server = LocalServer(args.server_addr, cipher)
-    remote_servers = [RemoteServer(a, cipher) for a in args.remote_server_addr or []]
+    def handle_communication(read, write):
+        recv_encrypted(read, write, cipher)
 
-    def listen_print(listen):
-        for msg in listen():
-            print(msg)
-    threading.Thread(target=lambda: listen_print(local_server.listen)).start()
+    local_server = LocalServer(args.server_addr, handle_communication)
+    remote_servers = [RemoteServer(a, handle_communication) for a in args.remote_server_addr or []]
+
+    def listen_and_route(server):
+        for src_id, data, encrypted_data in server.listen():
+            print(server, src_id, data)
+            for server2 in [local_server] + remote_servers:
+                server2.send(encrypted_data)
+    threading.Thread(target=lambda: listen_and_route(local_server)).start()
     for remote_server in remote_servers:
-        threading.Thread(target=lambda: listen_print(remote_server.listen)).start()
+        threading.Thread(target=lambda: listen_and_route(remote_server)).start()
 
     # TODO use (T)LV
     for line in fileinput.input([]):
         data = line.encode('utf-8')
-        local_server.send(data)
+        size_ulong = struct.pack('>L', len(data))
+        data_encrypted = cipher.encrypt(size_ulong + data)
+        local_server.send(data_encrypted)
         for remote_server in remote_servers:
-            remote_server.send(data)
+            remote_server.send(data_encrypted)
 
 if __name__ == '__main__':
     main()
