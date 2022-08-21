@@ -31,10 +31,18 @@ class PskCipher:
         self._cipher = ChaCha20Poly1305(psk)
 
     def encrypt(self, data):
-        nonce = os.urandom(12)
-        clk = struct.pack('>d', self._monotonic_offset + time.monotonic())
-        data = self._id + clk + data
-        return nonce + self._cipher.encrypt(nonce, self._pad(data), None)
+        pos = 0
+        while pos < len(data):
+            nonce = os.urandom(12)
+            clk = self._monotonic_offset + time.monotonic()
+            clk_double = struct.pack('>d', clk)
+            # ignore self
+            self._last_clk_by_id[self._id] = clk
+            # TODO what is the last 1
+            next_pos = pos + self._pad_chunk_size - 16 - 8 - 1 - 1
+            data_chunk = self._id + clk_double + data[pos:next_pos]
+            pos = next_pos
+            yield nonce + self._cipher.encrypt(nonce, self._pad(data_chunk), None)
 
     def decrypt(self, data):
         nonce, ciphertext = data[:12], data[12:]
@@ -52,8 +60,8 @@ class PskCipher:
         return src_id, plain
 
     def _pad(self, data):
-        padded_length = (((len(data) + 1) // self._pad_chunk_size) + 1) * self._pad_chunk_size
-        return (b'\x01' + data).rjust(padded_length, b'\x00')
+        assert len(data) <= self._pad_chunk_size - 1
+        return (b'\x01' + data).rjust(self._pad_chunk_size, b'\x00')
 
     def _unpad(self, data):
         for i, b in enumerate(data):
@@ -197,10 +205,10 @@ def main():
     for line in fileinput.input([]):
         data = line.encode('utf-8')
         size_ulong = struct.pack('>L', len(data))
-        data_encrypted = cipher.encrypt(size_ulong + data)
-        local_server.send(data_encrypted)
-        for remote_server in remote_servers:
-            remote_server.send(data_encrypted)
+        for data_encrypted in cipher.encrypt(size_ulong + data):
+            local_server.send(data_encrypted)
+            for remote_server in remote_servers:
+                remote_server.send(data_encrypted)
 
 if __name__ == '__main__':
     main()
