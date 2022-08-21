@@ -264,9 +264,7 @@ def main():
                         server.send(data_encrypted)
                 data_sent = True
         if not data_sent:
-            if not args.wait_input:
-                break
-            time.sleep(0.1)
+            break
 
 if __name__ == '__main__':
     main()
