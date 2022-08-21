@@ -134,7 +134,6 @@ class LocalServer:
 
     def _handle_connections(self):
         while True:
-            # TODO use addr to filter flooded nodes (don't echo to sender)
             conn, addr = self._sock.accept()
             print(conn, addr)
             self._conns.append((conn, addr))
