@@ -258,7 +258,7 @@ def main():
             if data:
                 for data_encrypted in cipher.encrypt(data):
                     # TODO wtf this breaks if the prints are not here
-                    print('-' * 50, sys.stderr)
+                    print('-' * 50, file=sys.stderr)
                     print(data_encrypted, file=sys.stderr)
                     for server in servers:
                         server.send(data_encrypted)
