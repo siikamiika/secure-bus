@@ -162,7 +162,7 @@ class RemoteServer:
         self._handle_communication = handle_communication
         self._message_queue = queue.Queue()
         self._sock = self._create_client()
-        threading.Thread(target=self._handle_connection).start()
+        self._handle_connection()
 
     def send(self, data, identifier=None):
         # TODO clean up self._conns on error
@@ -182,7 +182,13 @@ class RemoteServer:
         return client_sock
 
     def _handle_connection(self):
-        self._handle_communication(self._sock.recv, self._message_queue.put, self._sock.getpeername())
+        thread = threading.Thread(target=lambda: self._handle_communication(
+            self._sock.recv,
+            self._message_queue.put,
+            self._sock.getpeername()
+        ))
+        thread.daemon = True
+        thread.start()
 
 def test_crypto(cipher):
     for p in [
@@ -197,8 +203,9 @@ def test_crypto(cipher):
 
 def main():
     parser = argparse.ArgumentParser(description='Secure Bus')
-    parser.add_argument('--server-addr', nargs='?', default=':58823', help='Server listening address in the form host:port. Default 58823')
+    parser.add_argument('--server-addr', nargs='?', help='Server listening address in the form host:port')
     parser.add_argument('--remote-server-addr', nargs='*', help='Remote server address in the form host:port')
+    parser.add_argument('--wait-input', default=True, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     with open(os.path.expanduser('~/.secure_bus_psk'), 'rb') as f:
@@ -208,19 +215,24 @@ def main():
     def handle_communication(read, write, identifier):
         recv_encrypted(read, write, cipher, identifier)
 
-    local_server = LocalServer(args.server_addr, handle_communication)
-    remote_servers = [RemoteServer(a, handle_communication) for a in args.remote_server_addr or []]
+    servers = []
+    if args.server_addr:
+        local_server = LocalServer(args.server_addr, handle_communication)
+        servers.append(local_server)
+    for remote_addr in args.remote_server_addr or []:
+        remote_server = RemoteServer(remote_addr, handle_communication)
+        servers.append(remote_server)
 
-    def listen_and_route(server):
-        for src_id, identifier, data, encrypted_data in server.listen():
-            # print(server, src_id, file=sys.stderr)
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-            for server2 in [local_server] + remote_servers:
-                server2.send(encrypted_data, identifier)
-    threading.Thread(target=lambda: listen_and_route(local_server)).start()
-    for remote_server in remote_servers:
-        threading.Thread(target=lambda: listen_and_route(remote_server)).start()
+    if args.wait_input:
+        def listen_and_route(server):
+            for src_id, identifier, data, encrypted_data in server.listen():
+                # print(server, src_id, file=sys.stderr)
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+                for server2 in servers:
+                    server2.send(encrypted_data, identifier)
+        for server in servers:
+            threading.Thread(target=lambda: listen_and_route(server)).start()
 
     # TODO use (T)LV
     # for line in fileinput.input([]):
@@ -232,8 +244,7 @@ def main():
     #             remote_server.send(data_encrypted)
 
     while True:
-        fd = sys.stdin.buffer
-        rfnos, _, _ = select.select([fd.fileno()], [], [])
+        rfnos, _, _ = select.select([0], [], [])
         data_sent = False
         for fno in rfnos:
             # TODO remove hard coded size
@@ -243,11 +254,12 @@ def main():
                     # TODO wtf this breaks if the prints are not here
                     print('-' * 50, sys.stderr)
                     print(data_encrypted, file=sys.stderr)
-                    local_server.send(data_encrypted)
-                    for remote_server in remote_servers:
-                        remote_server.send(data_encrypted)
+                    for server in servers:
+                        server.send(data_encrypted)
                 data_sent = True
         if not data_sent:
+            if not args.wait_input:
+                break
             time.sleep(0.1)
 
 if __name__ == '__main__':
