@@ -134,12 +134,14 @@ class LocalServer:
         threading.Thread(target=self._handle_connections).start()
 
     def send(self, data, identifier=None):
-        # TODO clean up self._conns on error
         # TODO timeout
         # TODO concurrent sending (is such a thing even possible?)
-        for conn, addr in self._conns:
+        for conn, addr in list(self._conns):
             if addr != identifier:
-                conn.send(data)
+                try:
+                    conn.send(data)
+                except BrokenPipeError:
+                    self._conns.remove((conn, addr))
 
     def listen(self):
         while True:
@@ -169,7 +171,11 @@ class RemoteServer:
         # TODO timeout
         # TODO concurrent sending (is such a thing even possible?)
         if self._sock.getpeername() != identifier:
-            self._sock.send(data)
+            try:
+                self._sock.send(data)
+            except BrokenPipeError:
+                # TODO reconnect
+                pass
 
     def listen(self):
         while True:
