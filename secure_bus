@@ -7,7 +7,7 @@ import binascii
 import struct
 import socket
 import queue
-import fileinput
+import select
 import threading
 import argparse
 
@@ -33,6 +33,7 @@ class PskCipher:
     def encrypt(self, data):
         pos = 0
         while pos < len(data):
+            # print(pos, file=sys.stderr)
             nonce = os.urandom(12)
             clk = self._monotonic_offset + time.monotonic()
             clk_double = struct.pack('>d', clk)
@@ -74,8 +75,6 @@ def parse_addr(addr):
     return host, int(port)
 
 def recv_encrypted(read, write, cipher, identifier):
-    # TODO is this a thread safe implementation
-    ctx_by_src_id = {}
     while True:
         chunk = read(1400)
         if not chunk:
@@ -84,28 +83,46 @@ def recv_encrypted(read, write, cipher, identifier):
             src_id, data = cipher.decrypt(chunk)
         except CryptoException as e:
             continue
-        if src_id not in ctx_by_src_id:
-            ctx_by_src_id[src_id] = {
-                'raw_buf': [],
-                'buf': [],
-                'size': None,
-                'pos': 0,
-            }
-        ctx = ctx_by_src_id[src_id]
-        ctx['raw_buf'].append(chunk)
-        if ctx['size'] is None:
-            ctx['size'] = struct.unpack('>L', data[:4])[0]
-            data = data[4:]
-        ctx['buf'].append(data)
-        ctx['pos'] += len(data)
-        if ctx['pos'] >= ctx['size']:
-            write((
-                src_id,
-                identifier,
-                b''.join(ctx['buf']),
-                b''.join(ctx['raw_buf']),
-            ))
-            del ctx_by_src_id[src_id]
+        write((
+            src_id,
+            identifier,
+            data,
+            chunk,
+        ))
+
+# def recv_encrypted(read, write, cipher, identifier):
+#     # TODO is this a thread safe implementation
+#     ctx_by_src_id = {}
+#     while True:
+#         chunk = read(1400)
+#         if not chunk:
+#             break
+#         try:
+#             src_id, data = cipher.decrypt(chunk)
+#         except CryptoException as e:
+#             continue
+#         if src_id not in ctx_by_src_id:
+#             ctx_by_src_id[src_id] = {
+#                 'raw_buf': [],
+#                 'buf': [],
+#                 'size': None,
+#                 'pos': 0,
+#             }
+#         ctx = ctx_by_src_id[src_id]
+#         ctx['raw_buf'].append(chunk)
+#         if ctx['size'] is None:
+#             ctx['size'] = struct.unpack('>L', data[:4])[0]
+#             data = data[4:]
+#         ctx['buf'].append(data)
+#         ctx['pos'] += len(data)
+#         if ctx['pos'] >= ctx['size']:
+#             write((
+#                 src_id,
+#                 identifier,
+#                 b''.join(ctx['buf']),
+#                 b''.join(ctx['raw_buf']),
+#             ))
+#             del ctx_by_src_id[src_id]
 
 class LocalServer:
     def __init__(self, addr, handle_communication):
@@ -135,7 +152,7 @@ class LocalServer:
     def _handle_connections(self):
         while True:
             conn, addr = self._sock.accept()
-            print(conn, addr)
+            # print(conn, addr, file=sys.stderr)
             self._conns.append((conn, addr))
             threading.Thread(target=lambda: self._handle_communication(conn.recv, self._message_queue.put, addr)).start()
 
@@ -196,7 +213,9 @@ def main():
 
     def listen_and_route(server):
         for src_id, identifier, data, encrypted_data in server.listen():
-            print(server, src_id, data)
+            # print(server, src_id, file=sys.stderr)
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
             for server2 in [local_server] + remote_servers:
                 server2.send(encrypted_data, identifier)
     threading.Thread(target=lambda: listen_and_route(local_server)).start()
@@ -204,13 +223,32 @@ def main():
         threading.Thread(target=lambda: listen_and_route(remote_server)).start()
 
     # TODO use (T)LV
-    for line in fileinput.input([]):
-        data = line.encode('utf-8')
-        size_ulong = struct.pack('>L', len(data))
-        for data_encrypted in cipher.encrypt(size_ulong + data):
-            local_server.send(data_encrypted)
-            for remote_server in remote_servers:
-                remote_server.send(data_encrypted)
+    # for line in fileinput.input([]):
+    #     data = line.encode('utf-8')
+    #     size_ulong = struct.pack('>L', len(data))
+    #     for data_encrypted in cipher.encrypt(size_ulong + data):
+    #         local_server.send(data_encrypted)
+    #         for remote_server in remote_servers:
+    #             remote_server.send(data_encrypted)
+
+    while True:
+        fd = sys.stdin.buffer
+        rfnos, _, _ = select.select([fd.fileno()], [], [])
+        data_sent = False
+        for fno in rfnos:
+            # TODO remove hard coded size
+            data = os.read(fno, 1346)
+            if data:
+                for data_encrypted in cipher.encrypt(data):
+                    # TODO wtf this breaks if the prints are not here
+                    print('-' * 50, sys.stderr)
+                    print(data_encrypted, file=sys.stderr)
+                    local_server.send(data_encrypted)
+                    for remote_server in remote_servers:
+                        remote_server.send(data_encrypted)
+                data_sent = True
+        if not data_sent:
+            time.sleep(0.1)
 
 if __name__ == '__main__':
     main()
