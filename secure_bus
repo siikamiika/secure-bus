@@ -73,7 +73,7 @@ def parse_addr(addr):
     host, port = addr.split(':')
     return host, int(port)
 
-def recv_encrypted(read, write, cipher):
+def recv_encrypted(read, write, cipher, identifier):
     # TODO is this a thread safe implementation
     ctx_by_src_id = {}
     while True:
@@ -101,6 +101,7 @@ def recv_encrypted(read, write, cipher):
         if ctx['pos'] >= ctx['size']:
             write((
                 src_id,
+                identifier,
                 b''.join(ctx['buf']),
                 b''.join(ctx['raw_buf']),
             ))
@@ -115,12 +116,13 @@ class LocalServer:
         self._sock = self._create_server()
         threading.Thread(target=self._handle_connections).start()
 
-    def send(self, data):
+    def send(self, data, identifier=None):
         # TODO clean up self._conns on error
         # TODO timeout
         # TODO concurrent sending (is such a thing even possible?)
         for conn, addr in self._conns:
-            conn.send(data)
+            if addr != identifier:
+                conn.send(data)
 
     def listen(self):
         while True:
@@ -136,7 +138,7 @@ class LocalServer:
             conn, addr = self._sock.accept()
             print(conn, addr)
             self._conns.append((conn, addr))
-            threading.Thread(target=lambda: self._handle_communication(conn.recv, self._message_queue.put)).start()
+            threading.Thread(target=lambda: self._handle_communication(conn.recv, self._message_queue.put, addr)).start()
 
 class RemoteServer:
     def __init__(self, addr, handle_communication):
@@ -146,11 +148,12 @@ class RemoteServer:
         self._sock = self._create_client()
         threading.Thread(target=self._handle_connection).start()
 
-    def send(self, data):
+    def send(self, data, identifier=None):
         # TODO clean up self._conns on error
         # TODO timeout
         # TODO concurrent sending (is such a thing even possible?)
-        self._sock.send(data)
+        if self._sock.getpeername() != identifier:
+            self._sock.send(data)
 
     def listen(self):
         while True:
@@ -163,7 +166,7 @@ class RemoteServer:
         return client_sock
 
     def _handle_connection(self):
-        self._handle_communication(self._sock.recv, self._message_queue.put)
+        self._handle_communication(self._sock.recv, self._message_queue.put, self._sock.getpeername())
 
 def test_crypto(cipher):
     for p in [
@@ -186,17 +189,17 @@ def main():
         psk = binascii.unhexlify(f.read())
     cipher = PskCipher(psk)
 
-    def handle_communication(read, write):
-        recv_encrypted(read, write, cipher)
+    def handle_communication(read, write, identifier):
+        recv_encrypted(read, write, cipher, identifier)
 
     local_server = LocalServer(args.server_addr, handle_communication)
     remote_servers = [RemoteServer(a, handle_communication) for a in args.remote_server_addr or []]
 
     def listen_and_route(server):
-        for src_id, data, encrypted_data in server.listen():
+        for src_id, identifier, data, encrypted_data in server.listen():
             print(server, src_id, data)
             for server2 in [local_server] + remote_servers:
-                server2.send(encrypted_data)
+                server2.send(encrypted_data, identifier)
     threading.Thread(target=lambda: listen_and_route(local_server)).start()
     for remote_server in remote_servers:
         threading.Thread(target=lambda: listen_and_route(remote_server)).start()
