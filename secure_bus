@@ -7,7 +7,6 @@ import binascii
 import struct
 import socket
 import queue
-import select
 import threading
 import argparse
 
@@ -79,6 +78,8 @@ def recv_encrypted(read, write, cipher, identifier):
         chunk = read(1400)
         if not chunk:
             break
+        while len(chunk) < 1400:
+            chunk += read(1400 - len(chunk))
         try:
             src_id, data = cipher.decrypt(chunk)
         except CryptoException as e:
@@ -140,7 +141,7 @@ class LocalServer:
             if addr != identifier:
                 try:
                     conn.send(data)
-                except BrokenPipeError:
+                except (BrokenPipeError, ConnectionAbortedError):
                     self._conns.remove((conn, addr))
 
     def listen(self):
@@ -170,12 +171,12 @@ class RemoteServer:
         # TODO clean up self._conns on error
         # TODO timeout
         # TODO concurrent sending (is such a thing even possible?)
-        if self._sock.getpeername() != identifier:
-            try:
+        try:
+            if self._sock.getpeername() != identifier:
                 self._sock.send(data)
-            except BrokenPipeError:
-                # TODO reconnect
-                pass
+        except (BrokenPipeError, ConnectionAbortedError, OSError):
+            # TODO reconnect
+            pass
 
     def listen(self):
         while True:
@@ -240,30 +241,16 @@ def main():
         for server in servers:
             threading.Thread(target=lambda: listen_and_route(server)).start()
 
-    # TODO use (T)LV
-    # for line in fileinput.input([]):
-    #     data = line.encode('utf-8')
-    #     size_ulong = struct.pack('>L', len(data))
-    #     for data_encrypted in cipher.encrypt(size_ulong + data):
-    #         local_server.send(data_encrypted)
-    #         for remote_server in remote_servers:
-    #             remote_server.send(data_encrypted)
-
     while True:
-        rfnos, _, _ = select.select([0], [], [])
-        data_sent = False
-        for fno in rfnos:
-            # TODO remove hard coded size
-            data = os.read(fno, 1346)
-            if data:
-                for data_encrypted in cipher.encrypt(data):
-                    # TODO wtf this breaks if the prints are not here
-                    print('-' * 50, file=sys.stderr)
-                    print(data_encrypted, file=sys.stderr)
-                    for server in servers:
-                        server.send(data_encrypted)
-                data_sent = True
-        if not data_sent:
+        # TODO remove hard coded size
+        data = os.read(0, 1346)
+        if data:
+            for data_encrypted in cipher.encrypt(data):
+                # print('-' * 50, file=sys.stderr)
+                # print(data_encrypted, file=sys.stderr)
+                for server in servers:
+                    server.send(data_encrypted)
+        else:
             break
 
 if __name__ == '__main__':
