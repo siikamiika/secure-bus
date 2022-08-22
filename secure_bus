@@ -25,6 +25,7 @@ class PskCipher:
         self._last_clk_by_id = {}
         self._id = os.urandom(16)
         self._monotonic_offset = time.time() - time.monotonic()
+        self._clk_prev = None
         self._pad_chunk_size = pad_chunk_size
         self._clk_max_offset_sec = clk_max_offset_sec
         self._cipher = ChaCha20Poly1305(psk)
@@ -35,6 +36,11 @@ class PskCipher:
             # print(pos, file=sys.stderr)
             nonce = os.urandom(12)
             clk = self._monotonic_offset + time.monotonic()
+            # on windows monotonic clock resolution sucks, fake it
+            # TODO just use integer time already
+            if self._clk_prev is not None:
+                clk = max(self._clk_prev + 0.0001, clk)
+            self._clk_prev = clk
             clk_double = struct.pack('>d', clk)
             # ignore self
             self._last_clk_by_id[self._id] = clk
