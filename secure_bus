@@ -91,40 +91,6 @@ def recv_encrypted(read, write, cipher, identifier):
             chunk,
         ))
 
-# def recv_encrypted(read, write, cipher, identifier):
-#     # TODO is this a thread safe implementation
-#     ctx_by_src_id = {}
-#     while True:
-#         chunk = read(1400)
-#         if not chunk:
-#             break
-#         try:
-#             src_id, data = cipher.decrypt(chunk)
-#         except CryptoException as e:
-#             continue
-#         if src_id not in ctx_by_src_id:
-#             ctx_by_src_id[src_id] = {
-#                 'raw_buf': [],
-#                 'buf': [],
-#                 'size': None,
-#                 'pos': 0,
-#             }
-#         ctx = ctx_by_src_id[src_id]
-#         ctx['raw_buf'].append(chunk)
-#         if ctx['size'] is None:
-#             ctx['size'] = struct.unpack('>L', data[:4])[0]
-#             data = data[4:]
-#         ctx['buf'].append(data)
-#         ctx['pos'] += len(data)
-#         if ctx['pos'] >= ctx['size']:
-#             write((
-#                 src_id,
-#                 identifier,
-#                 b''.join(ctx['buf']),
-#                 b''.join(ctx['raw_buf']),
-#             ))
-#             del ctx_by_src_id[src_id]
-
 class LocalServer:
     def __init__(self, addr, handle_communication):
         self._host, self._port = parse_addr(addr)
