@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import ctypes
 import sys
 import time
 import binascii
@@ -12,6 +13,16 @@ import argparse
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
+if sys.platform == 'win32':
+    # https://discuss.python.org/t/higher-resolution-timers-on-windows/16153/13
+    _monotonic = ctypes.WinDLL('api-ms-win-core-realtime-l1-1-1').QueryUnbiasedInterruptTimePrecise
+    def monotonic_ns():
+        t = ctypes.c_ulonglong() # in units of 100 ns
+        _monotonic(ctypes.byref(t))
+        return t.value * 100
+else:
+    monotonic_ns = time.monotonic_ns
+
 class CryptoException(Exception):
     pass
 
@@ -20,14 +31,14 @@ class PskCipher:
         self,
         psk,
         pad_chunk_size=1372, # 1400 - overhead for optimal TCP delivery
-        clk_max_offset_sec=60.0
+        clk_max_offset_ns=60_000_000_000, # 60 seconds
     ):
         self._last_clk_by_id = {}
         self._id = os.urandom(16)
-        self._monotonic_offset = time.time() - time.monotonic()
+        self._monotonic_offset = time.time_ns() - monotonic_ns()
         self._clk_prev = None
         self._pad_chunk_size = pad_chunk_size
-        self._clk_max_offset_sec = clk_max_offset_sec
+        self._clk_max_offset_ns = clk_max_offset_ns
         self._cipher = ChaCha20Poly1305(psk)
 
     def encrypt(self, data):
@@ -35,18 +46,17 @@ class PskCipher:
         while pos < len(data):
             # print(pos, file=sys.stderr)
             nonce = os.urandom(12)
-            clk = self._monotonic_offset + time.monotonic()
-            # on windows monotonic clock resolution sucks, fake it
-            # TODO just use integer time already
+            clk = self._monotonic_offset + monotonic_ns()
+            # don't reuse the same time, required for replay protection
             if self._clk_prev is not None:
-                clk = max(self._clk_prev + 0.0001, clk)
+                clk = max(self._clk_prev + 1, clk)
             self._clk_prev = clk
-            clk_double = struct.pack('>d', clk)
+            clk_ulonglong = struct.pack('>Q', clk)
             # ignore self
             self._last_clk_by_id[self._id] = clk
             # TODO what is the last 1
             next_pos = pos + self._pad_chunk_size - 16 - 8 - 1 - 1
-            data_chunk = self._id + clk_double + data[pos:next_pos]
+            data_chunk = self._id + clk_ulonglong + data[pos:next_pos]
             pos = next_pos
             yield nonce + self._cipher.encrypt(nonce, self._pad(data_chunk), None)
 
@@ -54,13 +64,13 @@ class PskCipher:
         nonce, ciphertext = data[:12], data[12:]
         data = self._unpad(self._cipher.decrypt(nonce, ciphertext, None))
         src_id = data[0:16]
-        clk = struct.unpack('>d', data[16:24])[0]
+        clk = struct.unpack('>Q', data[16:24])[0]
         plain = data[24:]
         if src_id in self._last_clk_by_id:
             # as a side effect, this will also prevent routing loop through multiple nodes
             if self._last_clk_by_id[src_id] >= clk:
                 raise CryptoException('Replay or wrong payload order detected, aborting')
-            if abs(time.time() - clk) > self._clk_max_offset_sec:
+            if abs(time.time_ns() - clk) > self._clk_max_offset_ns:
                 raise CryptoException('Payload expired or clocks not in sync, aborting')
         self._last_clk_by_id[src_id] = clk
         return src_id, plain
