@@ -220,7 +220,12 @@ def main():
     cipher = PskCipher(psk)
 
     def handle_communication(read, write, identifier):
-        recv_encrypted(read, write, cipher, identifier)
+        def _read(length):
+            try:
+                return read(length)
+            except ConnectionResetError:
+                return b''
+        recv_encrypted(_read, write, cipher, identifier)
 
     servers = []
     if args.server_addr:
