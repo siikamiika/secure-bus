@@ -57,21 +57,23 @@ class PskCipher:
         ctr = struct.unpack('>I', data[12:16])[0]
         clk = struct.unpack('>Q', data[16:24])[0]
         plain = data[24:]
+        if abs(time.time_ns() - clk) > self._clk_max_offset_ns:
+            raise CryptoException('Payload expired or clocks not in sync, aborting')
         if src_id in self._ctx_by_id:
             ctx = self._ctx_by_id[src_id]
             # as a side effect, this will also prevent routing loop through multiple nodes
             if ctx['clk'] >= clk:
                 raise CryptoException('Replay or wrong payload order detected, aborting')
-            if abs(time.time_ns() - clk) > self._clk_max_offset_ns:
-                raise CryptoException('Payload expired or clocks not in sync, aborting')
             if ctr != (ctx['ctr'] + 1) % (2 ** 32):
                 print(ctr, ctx['ctr'], data[:16], file=sys.stderr)
                 raise CryptoException('Counter was not incremented by 1, aborting')
             ctx['ctr'] = ctr
             ctx['clk'] = clk
         else:
-            if ctr != 0:
-                raise CryptoException('Counter did not start from 0, aborting')
+            # TODO handle joining after some data has already been transmitted
+            # one possible option: wait some time before starting to accept data
+            # if ctr != 0:
+            #     raise CryptoException('Counter did not start from 0, aborting')
             ctx = {
                 'clk': clk,
                 'ctr': ctr,
