@@ -244,9 +244,9 @@ def main():
                             if data2:
                                 sys.stdout.buffer.write(data2)
                         sys.stdout.buffer.flush()
+                        del write_queue_by_id[current_id]
                         if not data2:
                             current_id = None
-                        del write_queue_by_id[current_id]
                     else:
                         current_id = None
                 else:
