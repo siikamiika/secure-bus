@@ -13,16 +13,6 @@ import argparse
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-if sys.platform == 'win32':
-    # https://discuss.python.org/t/higher-resolution-timers-on-windows/16153/13
-    _monotonic = ctypes.WinDLL('api-ms-win-core-realtime-l1-1-1').QueryUnbiasedInterruptTimePrecise
-    def monotonic_ns():
-        t = ctypes.c_ulonglong() # in units of 100 ns
-        _monotonic(ctypes.byref(t))
-        return t.value * 100
-else:
-    monotonic_ns = time.monotonic_ns
-
 class CryptoException(Exception):
     pass
 
@@ -35,7 +25,6 @@ class PskCipher:
     ):
         self._last_clk_by_id = {}
         self._id = os.urandom(16)
-        self._monotonic_offset = time.time_ns() - monotonic_ns()
         self._clk_prev = None
         self._pad_chunk_size = pad_chunk_size
         self._clk_max_offset_ns = clk_max_offset_ns
@@ -46,7 +35,7 @@ class PskCipher:
         while pos < len(data):
             # print(pos, file=sys.stderr)
             nonce = os.urandom(12)
-            clk = self._monotonic_offset + monotonic_ns()
+            clk = time.time_ns()
             # don't reuse the same time, required for replay protection
             if self._clk_prev is not None:
                 clk = max(self._clk_prev + 1, clk)
