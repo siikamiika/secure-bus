@@ -199,6 +199,7 @@ def main():
     parser.add_argument('--server-addr', nargs='?', help='Server listening address in the form host:port')
     parser.add_argument('--remote-server-addr', nargs='*', help='Remote server address in the form host:port')
     parser.add_argument('--wait-input', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--sentinel-byte', default=None, type=int, nargs='?')
     args = parser.parse_args()
 
     with open(os.path.expanduser('~/.secure_bus_psk'), 'rb') as f:
@@ -221,12 +222,39 @@ def main():
         remote_server = RemoteServer(remote_addr, handle_communication)
         servers.append(remote_server)
 
+    write_queue_by_id = {}
+    current_id = None
     if args.wait_input:
+        # TODO move this somewhere else
         def listen_and_route(server):
+            nonlocal current_id
             for src_id, identifier, data, encrypted_data in server.listen():
-                # print(server, src_id, file=sys.stderr)
-                sys.stdout.buffer.write(data)
-                sys.stdout.buffer.flush()
+                # print(server, src_id, data, file=sys.stderr)
+                # first come, first served
+                if current_id is None:
+                    current_id = src_id
+                if current_id == src_id:
+                    if data:
+                        sys.stdout.buffer.write(data)
+                        sys.stdout.buffer.flush()
+                    elif write_queue_by_id:
+                        current_id = next(iter(write_queue_by_id))
+                        data2 = None
+                        for data2 in write_queue_by_id[current_id]:
+                            if data2:
+                                sys.stdout.buffer.write(data2)
+                        sys.stdout.buffer.flush()
+                        if not data2:
+                            current_id = None
+                        del write_queue_by_id[current_id]
+                    else:
+                        current_id = None
+                else:
+                    if src_id not in write_queue_by_id:
+                        write_queue_by_id[src_id] = []
+                    write_queue_by_id[src_id].append(data)
+                # print(current_id, write_queue_by_id, file=sys.stderr)
+                # forward encrypted data
                 for server2 in servers:
                     server2.send(encrypted_data, identifier)
         for server in servers:
@@ -241,7 +269,13 @@ def main():
         for server in servers:
             server.send(data_encrypted)
         if not data:
+            # at this point servers have received empty data, freeing the lock
             break
+        # if the last byte was sentinel value, artificially send empty data to free the lock
+        if data[-1] == args.sentinel_byte:
+            empty_data = cipher.encrypt(b'')
+            for server in servers:
+                server.send(empty_data)
 
 if __name__ == '__main__':
     main()
