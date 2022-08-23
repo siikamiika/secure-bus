@@ -72,6 +72,7 @@ class PskCipher:
         else:
             # TODO handle joining after some data has already been transmitted
             # one possible option: wait some time before starting to accept data
+            # another: handle it application level
             # if ctr != 0:
             #     raise CryptoException('Counter did not start from 0, aborting')
             ctx = {
