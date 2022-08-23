@@ -21,47 +21,66 @@ class PskCipher:
         self,
         psk,
         pad_chunk_size=1372, # 1400 - overhead for optimal TCP delivery
-        clk_max_offset_ns=60_000_000_000, # 60 seconds
+        clk_max_offset_ns=10_000_000_000, # 10 seconds
     ):
-        self._last_clk_by_id = {}
-        self._id = os.urandom(16)
-        self._clk_prev = None
+        self._id = os.urandom(12)
+        self._ctx_by_id = {
+            self._id: {
+                'clk': None,
+                'ctr': 0,
+            }
+        }
         self._pad_chunk_size = pad_chunk_size
         self._clk_max_offset_ns = clk_max_offset_ns
         self._cipher = ChaCha20Poly1305(psk)
 
     def encrypt(self, data):
         pos = 0
+        # as a side effect, don't allow decrypting data encrypted with encrypt()
+        ctx = self._ctx_by_id[self._id]
         while pos < len(data):
             # print(pos, file=sys.stderr)
             nonce = os.urandom(12)
             clk = time.time_ns()
             # don't reuse the same time, required for replay protection
-            if self._clk_prev is not None:
-                clk = max(self._clk_prev + 1, clk)
-            self._clk_prev = clk
+            if ctx['clk'] is not None:
+                clk = max(ctx['clk'] + 1, clk)
+            ctx['clk'] = clk
             clk_ulonglong = struct.pack('>Q', clk)
-            # ignore self
-            self._last_clk_by_id[self._id] = clk
             # TODO what is the last 1
             next_pos = pos + self._pad_chunk_size - 16 - 8 - 1 - 1
-            data_chunk = self._id + clk_ulonglong + data[pos:next_pos]
+            data_chunk = self._id + struct.pack('>I', ctx['ctr']) + clk_ulonglong + data[pos:next_pos]
+            ctx['ctr'] = (ctx['ctr'] + 1) % (2 ** 32)
             pos = next_pos
             yield nonce + self._cipher.encrypt(nonce, self._pad(data_chunk), None)
 
     def decrypt(self, data):
         nonce, ciphertext = data[:12], data[12:]
         data = self._unpad(self._cipher.decrypt(nonce, ciphertext, None))
-        src_id = data[0:16]
+        src_id = data[0:12]
+        ctr = struct.unpack('>I', data[12:16])[0]
         clk = struct.unpack('>Q', data[16:24])[0]
         plain = data[24:]
-        if src_id in self._last_clk_by_id:
+        if src_id in self._ctx_by_id:
+            ctx = self._ctx_by_id[src_id]
             # as a side effect, this will also prevent routing loop through multiple nodes
-            if self._last_clk_by_id[src_id] >= clk:
+            if ctx['clk'] >= clk:
                 raise CryptoException('Replay or wrong payload order detected, aborting')
             if abs(time.time_ns() - clk) > self._clk_max_offset_ns:
                 raise CryptoException('Payload expired or clocks not in sync, aborting')
-        self._last_clk_by_id[src_id] = clk
+            if ctr != (ctx['ctr'] + 1) % (2 ** 32):
+                print(ctr, ctx['ctr'], data[:16], file=sys.stderr)
+                raise CryptoException('Counter was not incremented by 1, aborting')
+            ctx['ctr'] = ctr
+            ctx['clk'] = clk
+        else:
+            if ctr != 0:
+                raise CryptoException('Counter did not start from 0, aborting')
+            ctx = {
+                'clk': clk,
+                'ctr': ctr,
+            }
+            self._ctx_by_id[src_id] = ctx
         return src_id, plain
 
     def _pad(self, data):
