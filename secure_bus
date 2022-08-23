@@ -35,24 +35,20 @@ class PskCipher:
         self._cipher = ChaCha20Poly1305(psk)
 
     def encrypt(self, data):
-        pos = 0
+        if len(data) > self._pad_chunk_size - 26:
+            raise Exception('Data too long to encrypt')
         # as a side effect, don't allow decrypting data encrypted with encrypt()
         ctx = self._ctx_by_id[self._id]
-        while pos < len(data):
-            # print(pos, file=sys.stderr)
-            nonce = os.urandom(12)
-            clk = time.time_ns()
-            # don't reuse the same time, required for replay protection
-            if ctx['clk'] is not None:
-                clk = max(ctx['clk'] + 1, clk)
-            ctx['clk'] = clk
-            clk_ulonglong = struct.pack('>Q', clk)
-            # TODO what is the last 1
-            next_pos = pos + self._pad_chunk_size - 16 - 8 - 1 - 1
-            data_chunk = self._id + struct.pack('>I', ctx['ctr']) + clk_ulonglong + data[pos:next_pos]
-            ctx['ctr'] = (ctx['ctr'] + 1) % (2 ** 32)
-            pos = next_pos
-            yield nonce + self._cipher.encrypt(nonce, self._pad(data_chunk), None)
+        nonce = os.urandom(12)
+        clk = time.time_ns()
+        # don't reuse the same time, required for replay protection
+        if ctx['clk'] is not None:
+            clk = max(ctx['clk'] + 1, clk)
+        ctx['clk'] = clk
+        clk_ulonglong = struct.pack('>Q', clk)
+        data_chunk = self._id + struct.pack('>I', ctx['ctr']) + clk_ulonglong + data
+        ctx['ctr'] = (ctx['ctr'] + 1) % (2 ** 32)
+        return nonce + self._cipher.encrypt(nonce, self._pad(data_chunk), None)
 
     def decrypt(self, data):
         nonce, ciphertext = data[:12], data[12:]
@@ -239,13 +235,12 @@ def main():
     while True:
         # TODO remove hard coded size
         data = os.read(0, 1346)
-        if data:
-            for data_encrypted in cipher.encrypt(data):
-                # print('-' * 50, file=sys.stderr)
-                # print(data_encrypted, file=sys.stderr)
-                for server in servers:
-                    server.send(data_encrypted)
-        else:
+        data_encrypted = cipher.encrypt(data)
+        # print('-' * 50, file=sys.stderr)
+        # print(data_encrypted, file=sys.stderr)
+        for server in servers:
+            server.send(data_encrypted)
+        if not data:
             break
 
 if __name__ == '__main__':
