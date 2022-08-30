@@ -227,11 +227,13 @@ def main():
 
     write_queue_by_id = {}
     current_id = None
+    listen_lock = threading.Lock()
     if args.wait_input:
         # TODO move this somewhere else
         def listen_and_route(server):
             nonlocal current_id
             for src_id, identifier, data, encrypted_data in server.listen():
+                listen_lock.acquire()
                 # print(server, src_id, data, file=sys.stderr)
                 # first come, first served
                 if current_id is None:
@@ -260,6 +262,7 @@ def main():
                 # forward encrypted data
                 for server2 in servers:
                     server2.send(encrypted_data, identifier)
+                listen_lock.release()
         for server in servers:
             threading.Thread(target=lambda: listen_and_route(server)).start()
 
